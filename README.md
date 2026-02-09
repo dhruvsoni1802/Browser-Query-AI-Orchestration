@@ -28,5 +28,5 @@
 
 After installation, you can run the project:
 ```bash
-python app/main.py
+uvicorn app.main:app --reload --port 8000
 ```

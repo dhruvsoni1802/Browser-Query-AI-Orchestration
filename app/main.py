@@ -5,11 +5,9 @@ from app.services.browser_client import BrowserClient
 from app.api.routes import router
 
 
+#Manages the lifecycle of application-wide resources
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-  
-    #Manages the lifecycle of application-wide resources
-
     #Everything before 'yield' runs during startup.
     app.state.browser_client = BrowserClient(
         base_url=str(settings.infrastructure_url)

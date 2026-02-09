@@ -46,7 +46,7 @@ async def submit_query(query_request: QueryRequest, request: Request):
             detail=f"Created session {session.session_id}",
         ))
 
-        # Step 2: Placeholder
+        # Step 2: Placeholder.
         steps.append(WorkflowStep(
             step_number=2,
             action="placeholder",

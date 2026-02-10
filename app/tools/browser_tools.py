@@ -1,3 +1,4 @@
+import httpx
 from langchain_core.tools import tool
 from app.services.browser_client import BrowserClient
 
@@ -20,8 +21,15 @@ def create_browser_tools(client: BrowserClient) -> list:
         Returns:
             A message containing the session_id you need for further operations.
         """
-        result = await client.create_session(agent_id, session_name)
-        return f"Session created. session_id: {result.session_id}, session_name: {result.session_name}"
+        try:
+            result = await client.create_session(agent_id, session_name)
+            return f"Session created. session_id: {result.session_id}, session_name: {result.session_name}"
+        except httpx.HTTPStatusError as e:
+            return f"Error creating session: HTTP {e.response.status_code} — {e.response.text}"
+        except httpx.ConnectError:
+            return f"Error creating session: Could not connect to browser infrastructure"
+        except Exception as e:
+            return f"Error creating session: {str(e)}"
 
     @tool
     async def navigate(session_id: str, url: str) -> str:
@@ -41,8 +49,15 @@ def create_browser_tools(client: BrowserClient) -> list:
         Returns:
             A message containing the page_id and the final URL after any redirects.
         """
-        result = await client.navigate(session_id, url)
-        return f"Navigated successfully. page_id: {result.page_id}, url: {result.url}"
+        try:
+            result = await client.navigate(session_id, url)
+            return f"Navigated successfully. page_id: {result.page_id}, url: {result.url}"
+        except httpx.HTTPStatusError as e:
+            return f"Error navigating to {url}: HTTP {e.response.status_code} — {e.response.text}"
+        except httpx.ConnectError:
+            return f"Error navigating: Could not connect to browser infrastructure"
+        except Exception as e:
+            return f"Error navigating to {url}: {str(e)}"
 
     @tool
     async def get_page_content(session_id: str, page_id: str) -> str:
@@ -62,8 +77,15 @@ def create_browser_tools(client: BrowserClient) -> list:
         Returns:
             The HTML content of the page.
         """
-        result = await client.get_page_content(session_id, page_id)
-        return f"Page content (length: {result.length}):\n{result.content}"
+        try:
+            result = await client.get_page_content(session_id, page_id)
+            return f"Page content (length: {result.length}):\n{result.content}"
+        except httpx.HTTPStatusError as e:
+            return f"Error getting page content: HTTP {e.response.status_code} — {e.response.text}"
+        except httpx.ConnectError:
+            return f"Error getting page content: Could not connect to browser infrastructure"
+        except Exception as e:
+            return f"Error getting page content: {str(e)}"
 
     @tool
     async def execute_js(session_id: str, page_id: str, script: str) -> str:
@@ -88,8 +110,15 @@ def create_browser_tools(client: BrowserClient) -> list:
         Returns:
             The result of the JavaScript execution as a string.
         """
-        result = await client.execute_js(session_id, page_id, script)
-        return f"JavaScript executed successfully. result: {result.result}"
+        try:
+            result = await client.execute_js(session_id, page_id, script)
+            return f"JavaScript executed successfully. result: {result.result}"
+        except httpx.HTTPStatusError as e:
+            return f"Error executing JavaScript: HTTP {e.response.status_code} — {e.response.text}"
+        except httpx.ConnectError:
+            return f"Error executing JavaScript: Could not connect to browser infrastructure"
+        except Exception as e:
+            return f"Error executing JavaScript: {str(e)}"
 
     @tool
     async def capture_screenshot(session_id: str, page_id: str) -> str:
@@ -108,11 +137,15 @@ def create_browser_tools(client: BrowserClient) -> list:
             A message confirming the screenshot was captured, with its size.
             The actual image data is base64 encoded.
         """
-      
-        # Note: returning the full base64 string to the LLM would waste context window. Returning metadata about the screenshot instead.
-        #TODO: Think what is useful for LLM to know here
-        result = await client.capture_screenshot(session_id, page_id)
-        return f"Screenshot captured successfully. size: {result.size}, format: {result.format}"
+        try:
+            result = await client.capture_screenshot(session_id, page_id)
+            return f"Screenshot captured successfully. size: {result.size}, format: {result.format}"
+        except httpx.HTTPStatusError as e:
+            return f"Error capturing screenshot: HTTP {e.response.status_code} — {e.response.text}"
+        except httpx.ConnectError:
+            return f"Error capturing screenshot: Could not connect to browser infrastructure"
+        except Exception as e:
+            return f"Error capturing screenshot: {str(e)}"
 
     @tool
     async def close_page(session_id: str, page_id: str) -> str:
@@ -129,9 +162,15 @@ def create_browser_tools(client: BrowserClient) -> list:
         Returns:
             Confirmation that the page was closed.
         """
-
-        result = await client.close_page(session_id, page_id)
-        return f"Page closed successfully. page_id: {page_id}"
+        try:
+            await client.close_page(session_id, page_id)
+            return f"Page closed successfully. page_id: {page_id}"
+        except httpx.HTTPStatusError as e:
+            return f"Error closing page: HTTP {e.response.status_code} — {e.response.text}"
+        except httpx.ConnectError:
+            return f"Error closing page: Could not connect to browser infrastructure"
+        except Exception as e:
+            return f"Error closing page: {str(e)}"
 
     @tool
     async def close_session(session_id: str) -> str:
@@ -147,9 +186,15 @@ def create_browser_tools(client: BrowserClient) -> list:
         Returns:
             Confirmation that the session was closed.
         """
-      
-        result = await client.close_session(session_id)
-        return f"Session closed successfully. session_id: {result.session_id}, session_name: {result.session_name}"
+        try:
+            result = await client.close_session(session_id)
+            return f"Session closed successfully. session_id: {result.session_id}, session_name: {result.session_name}"
+        except httpx.HTTPStatusError as e:
+            return f"Error closing session: HTTP {e.response.status_code} — {e.response.text}"
+        except httpx.ConnectError:
+            return f"Error closing session: Could not connect to browser infrastructure"
+        except Exception as e:
+            return f"Error closing session: {str(e)}"
 
     @tool
     async def delete_session(session_id: str) -> str:
@@ -165,10 +210,16 @@ def create_browser_tools(client: BrowserClient) -> list:
         Returns:
             Confirmation that the session was deleted.
         """
-        result = await client.delete_session(session_id)
-        return f"Session deleted successfully. session_id: {session_id}"
+        try:
+            await client.delete_session(session_id)
+            return f"Session deleted successfully. session_id: {session_id}"
+        except httpx.HTTPStatusError as e:
+            return f"Error deleting session: HTTP {e.response.status_code} — {e.response.text}"
+        except httpx.ConnectError:
+            return f"Error deleting session: Could not connect to browser infrastructure"
+        except Exception as e:
+            return f"Error deleting session: {str(e)}"
 
-    # Return all tools as a list
     return [
         create_session,
         navigate,

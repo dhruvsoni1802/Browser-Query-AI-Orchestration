@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Request
+from fastapi.responses import StreamingResponse
 from app.models.schemas import (
     QueryRequest,
     QueryResponse,
     HealthResponse,
-    
 )
 from app.config import settings
 
@@ -38,4 +38,22 @@ async def submit_query(query_request: QueryRequest, request: Request):
         query=query_request.query,
         agent_id=query_request.agent_id,
         session_name=query_request.session_name,
+    )
+
+@router.post("/query/stream")
+async def stream_query(query_request: QueryRequest, request: Request):
+    agent_service = get_agent_service(request)
+
+    return StreamingResponse(
+        agent_service.stream_query(
+            query=query_request.query,
+            agent_id=query_request.agent_id,
+            session_name=query_request.session_name,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )

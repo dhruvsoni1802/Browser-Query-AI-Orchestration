@@ -112,3 +112,19 @@ class HealthResponse(BaseModel):
     service: str = "orchestrator"
     version: str
     infrastructure_reachable: bool
+
+# Streaming Event Schemas
+
+class StreamEventType(str, Enum):
+    step_start = "step_start"
+    step_complete = "step_complete"
+    step_error = "step_error"
+    thinking = "thinking"
+    answer_complete = "answer_complete"
+    answer_chunk = "answer_chunk"
+    done = "done"
+    error = "error"
+
+class StreamEvent(BaseModel):
+    event: StreamEventType
+    data: dict

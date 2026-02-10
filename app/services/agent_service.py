@@ -3,8 +3,10 @@ from app.graph.state import AgentState
 from app.services.browser_client import BrowserClient
 from app.models.schemas import QueryResponse, WorkflowStep
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+from app.models.schemas import StreamEvent, StreamEventType
 import logging
-from typing import cast
+import json
+from typing import cast, AsyncGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +56,106 @@ class AgentService:
                 success=False,
                 error=str(e),
             )
+
+    async def stream_query(self, query: str, agent_id: str, session_name: str | None = None) -> AsyncGenerator[str, None]:
+        inputs = {
+            "messages": [HumanMessage(
+                content=f"Agent ID: {agent_id}\n"
+                        f"{'Session name: ' + session_name + chr(10) if session_name else ''}"
+                        f"Task: {query}"
+            )]
+        }
+
+        step_number = 0
+        current_answer = ""
+
+        try:
+            async for event in self.agent.astream_events(inputs, version="v2"):
+                event_type = event.get("event")
+                event_name = event.get("name", "")
+                event_data = event.get("data", {})
+
+                #Agent decided to call a tool
+                if event_type == "on_tool_start":
+                    step_number += 1
+                    tool_input = event_data.get("input", {})
+
+                    detail = self._format_tool_detail(event_name, tool_input)
+
+                    yield self._format_sse(StreamEvent(
+                        event=StreamEventType.step_start,
+                        data={
+                            "step_number": step_number,
+                            "action": event_name,
+                            "detail": detail,
+                        }
+                    ))
+
+                #Tool finished: got a result back
+                elif event_type == "on_tool_end":
+                    output = event_data.get("output", "")
+                    is_error = isinstance(output, str) and output.startswith("Error")
+
+                    if is_error:
+                        yield self._format_sse(StreamEvent(
+                            event=StreamEventType.step_error,
+                            data={
+                                "step_number": step_number,
+                                "action": event_name,
+                                "error": output,
+                            }
+                        ))
+                    else:
+                        yield self._format_sse(StreamEvent(
+                            event=StreamEventType.step_complete,
+                            data={
+                                "step_number": step_number,
+                                "action": event_name,
+                            }
+                        ))
+                
+                #LLM is generating tokens (the final answer)
+                elif event_type == "on_chat_model_stream":
+                    chunk = event_data.get("chunk")
+                    if chunk and hasattr(chunk, "content") and chunk.content:
+                        # Only stream text content, not tool call tokens
+                        if not (hasattr(chunk, "tool_calls") and chunk.tool_calls):
+                            current_answer += chunk.content
+
+                            #TODO: Uncomment this to see LLM generating tokens (the final answer)
+                            # yield self._format_sse(StreamEvent(
+                            #     event=StreamEventType.answer_chunk,
+                            #     data={"chunk": chunk.content}
+                            # ))
+
+                #Agent is reasoning
+                elif event_type == "on_chat_model_start":
+                    if step_number > 0:
+                        yield self._format_sse(StreamEvent(
+                            event=StreamEventType.thinking,
+                            data={"detail": "Agent is reasoning..."}
+                        ))
+
+            #Agent finished
+            yield self._format_sse(StreamEvent(
+                event=StreamEventType.answer_complete,
+                data={"answer": current_answer}
+            ))
+
+            yield self._format_sse(StreamEvent(
+                event=StreamEventType.done,
+                data={"success": True}
+            ))
+
+        except Exception as e:
+            logger.error(f"Streaming execution failed: {str(e)}", exc_info=True)
+            yield self._format_sse(StreamEvent(
+                event=StreamEventType.error,
+                data={"error": str(e)}
+            ))
+
+    def _format_sse(self, stream_event: StreamEvent) -> str:
+        return f"event: {stream_event.event.value}\ndata: {json.dumps(stream_event.data)}\n\n"
 
     #Helper method to extract workflow steps from the message history.
     def _extract_steps(self, messages: list) -> list[WorkflowStep]:

@@ -26,8 +26,14 @@
 
 ## Running the Project
 
-After installation, you can run the project:
-```bash
-uvicorn app.main:app --reload --port 8000
+After installation, make sure your virtual environment is activated, then run:
 
+```bash
+# Make sure venv is activated (you should see (venv) in your terminal)
+uvicorn app.main:app --reload --port 8000
+```
+
+**Important:** Always activate the virtual environment before running the project:
+```bash
+source venv/bin/activate  # On macOS/Linux
 ```

@@ -1,6 +1,6 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from enum import Enum
-from typing import Optional
+from typing import Optional, Any
 from typing import List
 
 class SessionStatus(str, Enum):
@@ -64,7 +64,7 @@ class NavigateResponse(BaseModel):
 class ExecuteJsResponse(BaseModel):
     session_id: str
     page_id: str
-    result: Optional[str] = None
+    result: Optional[Any] = None
 
 class ScreenshotResponse(BaseModel):
     session_id: str
@@ -122,9 +122,63 @@ class StreamEventType(str, Enum):
     thinking = "thinking"
     answer_complete = "answer_complete"
     answer_chunk = "answer_chunk"
+    cleanup = "cleanup"
     done = "done"
     error = "error"
 
 class StreamEvent(BaseModel):
     event: StreamEventType
     data: dict
+
+class PageAnalysisStructure(BaseModel):
+    """The structural breakdown of a page."""
+    classes: list[str] = []
+    ids: list[str] = []
+    headings: dict[str, list[str]] = {}
+    interactive: dict[str, list[str]] = {}
+    semantic_sections: list["SemanticSection"] = []
+    data_attributes: list[str] = []
+    text_snippets: list[str] = []
+
+class SemanticSection(BaseModel):
+    """A semantic section element description."""
+    type: str
+    class_name: list[str] = Field(default_factory=list, validation_alias="class")
+    selectors: list[str] = []
+
+    class Config:
+        extra = "allow"
+
+    @field_validator("class_name", mode="before")
+    @classmethod
+    def _coerce_class_name(cls, value):
+        # Backend may return a single class string instead of list.
+        if isinstance(value, str):
+            return [value]
+        return value
+
+class PageAnalysisDetail(BaseModel):
+    """Inner analysis object."""
+    page_id: str
+    url: str
+    title: str
+    structure: PageAnalysisStructure
+
+class PageAnalysisResponse(BaseModel):
+    """Response from POST /sessions/{id}/analyze."""
+    session_id: str
+    page_id: str
+    analysis: PageAnalysisDetail
+
+class AccessibilityNode(BaseModel):
+    """A single node in the accessibility tree."""
+    role: str
+    name: str = ""
+    focusable: bool = False
+    children: list["AccessibilityNode"] = []
+
+class AccessibilityTreeResponse(BaseModel):
+    """Response from POST /sessions/{id}/accessibility-tree."""
+    session_id: str
+    page_id: str
+    nodes: list[AccessibilityNode]

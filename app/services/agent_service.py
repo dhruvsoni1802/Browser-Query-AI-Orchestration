@@ -6,12 +6,11 @@ from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from app.models.schemas import StreamEvent, StreamEventType
 import logging
 import json
-from typing import cast, AsyncGenerator
+from typing import AsyncGenerator
 
 logger = logging.getLogger(__name__)
 
 
-#Bridge between FastAPI and LangGraph.
 class AgentService:
 
     def __init__(self, client: BrowserClient):
@@ -19,23 +18,24 @@ class AgentService:
 
     async def execute_query(self, query: str, agent_id: str, session_name: str | None = None) -> QueryResponse:
         inputs: AgentState = {
-            "messages": [HumanMessage(
-                content=f"Agent ID: {agent_id}\n"
-                        f"{'Session name: ' + session_name if session_name else ''}"
-                        f"Task: {query}"
-            )]
+            "messages": [HumanMessage(content=query)],
+            "agent_id": agent_id,
+            "query": query,
+            "session_id": None,
+            "current_page_id": None,
+            "page_analysis": None,
+            "iteration_count": 0,
+            "max_iterations": 15,
+            "error": None,
         }
 
         try:
             result = await self.agent.ainvoke(inputs)
             messages = result["messages"]
 
-            # Extract workflow steps and final answer from the message history
             steps = self._extract_steps(messages)
             answer = self._extract_answer(messages)
-
-            # Try to find the session_id from the tool messages
-            session_id = self._extract_session_id(messages)
+            session_id = result.get("session_id")
 
             return QueryResponse(
                 query=query,
@@ -59,11 +59,15 @@ class AgentService:
 
     async def stream_query(self, query: str, agent_id: str, session_name: str | None = None) -> AsyncGenerator[str, None]:
         inputs = {
-            "messages": [HumanMessage(
-                content=f"Agent ID: {agent_id}\n"
-                        f"{'Session name: ' + session_name + chr(10) if session_name else ''}"
-                        f"Task: {query}"
-            )]
+            "messages": [HumanMessage(content=query)],
+            "agent_id": agent_id,
+            "query": query,
+            "session_id": None,
+            "current_page_id": None,
+            "page_analysis": None,
+            "iteration_count": 0,
+            "max_iterations": 15,
+            "error": None,
         }
 
         step_number = 0
@@ -75,7 +79,7 @@ class AgentService:
                 event_name = event.get("name", "")
                 event_data = event.get("data", {})
 
-                #Agent decided to call a tool
+                # Agent decided to call a tool
                 if event_type == "on_tool_start":
                     step_number += 1
                     tool_input = event_data.get("input", {})
@@ -91,7 +95,7 @@ class AgentService:
                         }
                     ))
 
-                #Tool finished: got a result back
+                # Tool finished
                 elif event_type == "on_tool_end":
                     output = event_data.get("output", "")
                     is_error = isinstance(output, str) and output.startswith("Error")
@@ -113,30 +117,33 @@ class AgentService:
                                 "action": event_name,
                             }
                         ))
-                
-                #LLM is generating tokens (the final answer)
+
+                # LLM generating tokens
                 elif event_type == "on_chat_model_stream":
                     chunk = event_data.get("chunk")
                     if chunk and hasattr(chunk, "content") and chunk.content:
-                        # Only stream text content, not tool call tokens
                         if not (hasattr(chunk, "tool_calls") and chunk.tool_calls):
+                            yield self._format_sse(StreamEvent(
+                                event=StreamEventType.answer_chunk,
+                                data={"chunk": chunk.content}
+                            ))
                             current_answer += chunk.content
 
-                            #TODO: Uncomment this to see LLM generating tokens (the final answer)
-                            # yield self._format_sse(StreamEvent(
-                            #     event=StreamEventType.answer_chunk,
-                            #     data={"chunk": chunk.content}
-                            # ))
-
-                #Agent is reasoning
+                # Agent is reasoning
                 elif event_type == "on_chat_model_start":
                     if step_number > 0:
                         yield self._format_sse(StreamEvent(
                             event=StreamEventType.thinking,
                             data={"detail": "Agent is reasoning..."}
                         ))
+                # Cleanup node finished
+                elif event_type == "on_chain_end" and event_name == "cleanup":
+                    yield self._format_sse(StreamEvent(
+                        event=StreamEventType.cleanup,
+                        data={"detail": "Cleaning up session"}
+                    ))
 
-            #Agent finished
+            # Agent finished
             yield self._format_sse(StreamEvent(
                 event=StreamEventType.answer_complete,
                 data={"answer": current_answer}
@@ -157,19 +164,15 @@ class AgentService:
     def _format_sse(self, stream_event: StreamEvent) -> str:
         return f"event: {stream_event.event.value}\ndata: {json.dumps(stream_event.data)}\n\n"
 
-    #Helper method to extract workflow steps from the message history.
     def _extract_steps(self, messages: list) -> list[WorkflowStep]:
         steps = []
         step_number = 1
 
         for message in messages:
-            # AIMessage with tool_calls means the agent decided to call a tool
             if isinstance(message, AIMessage) and message.tool_calls:
                 for tool_call in message.tool_calls:
                     tool_name = tool_call.get("name", "unknown")
                     tool_args = tool_call.get("args", {})
-
-                    # Build a human-readable description of what happened
                     detail = self._format_tool_detail(tool_name, tool_args)
 
                     steps.append(WorkflowStep(
@@ -180,8 +183,6 @@ class AgentService:
                     ))
                     step_number += 1
 
-            # ToolMessage means the result from a tool execution
-            # Check if it was an error and update the last step accordingly
             if isinstance(message, ToolMessage) and steps:
                 content = message.content
                 if isinstance(content, str) and content.startswith("Error"):
@@ -190,27 +191,21 @@ class AgentService:
 
         return steps
 
-    #Helper method to extract the final answer from the message history.
     def _extract_answer(self, messages: list) -> str:
-
-        # Walk backwards through messages to find the last AIMessage without tool calls
         for message in reversed(messages):
             if isinstance(message, AIMessage) and not message.tool_calls:
                 content = message.content
                 if isinstance(content, str):
                     return content
-                # If content is a list, convert to string
                 return str(content)
 
         return "The agent completed but did not produce a final answer."
 
-    #Helper method to extract the session_id from the tool messages.
     def _extract_session_id(self, messages: list) -> str | None:
         for message in messages:
             if isinstance(message, ToolMessage) and isinstance(message.content, str):
                 if "session_id:" in message.content:
                     try:
-                        # Parse "session_id: sess_xxx" from the tool output
                         part = message.content.split("session_id:")[1]
                         session_id = part.split(",")[0].strip()
                         return session_id
@@ -218,29 +213,33 @@ class AgentService:
                         continue
         return None
 
-    #Helper method to format the tool detail for the workflow visualization.
     def _format_tool_detail(self, tool_name: str, tool_args: dict) -> str:
         match tool_name:
             case "create_session":
-                agent_id = tool_args.get("agent_id", "unknown")
-                return f"Creating browser session for agent '{agent_id}'"
+                return "Creating browser session"
             case "navigate":
                 url = tool_args.get("url", "unknown")
                 return f"Navigating to {url}"
+            case "analyze_page":
+                return "Analyzing page structure"
+            case "get_accessibility_tree":
+                return "Getting accessibility tree"
             case "get_page_content":
                 return "Extracting page content"
             case "execute_js":
                 script = tool_args.get("script", "")
-                # Truncate long scripts for readability
                 preview = script[:80] + "..." if len(script) > 80 else script
                 return f"Executing JavaScript: {preview}"
+            case "search_text":
+                query = tool_args.get("query", "")
+                return f"Searching page text for \"{query}\""
             case "capture_screenshot":
                 return "Capturing screenshot of current page"
             case "close_page":
                 return "Closing page"
-            case "close_session":
-                return "Closing session (preserving data)"
-            case "delete_session":
-                return "Deleting session (final cleanup)"
+            case "analyze_page":
+                return "Analyzing page structure"
+            case "get_accessibility_tree":
+                return "Getting accessibility tree"
             case _:
                 return f"Calling {tool_name} with {tool_args}"

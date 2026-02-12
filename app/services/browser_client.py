@@ -11,6 +11,8 @@ from app.models.schemas import (
     PageContentResponse,
     CloseSessionResponse,
     ResumeSessionResponse,
+    PageAnalysisResponse,
+    AccessibilityTreeResponse,
 )
 from typing import Optional
 
@@ -30,14 +32,13 @@ class BrowserClient:
         await self.client.aclose()
 
     async def ping(self) -> bool:
-        #Check if the Go backend is reachable.We use list_sessions as a lightweight check — if it responds, the backend is up.
         try:
             response = await self.client.get("/sessions")
             return response.status_code == 200
         except (httpx.ConnectError, httpx.TimeoutException):
             return False
 
-    # Session Management APIs
+    # --- Session Management ---
 
     async def create_session(self, agent_id: str, session_name: Optional[str] = None) -> SessionInfo:
         payload = {"agent_id": agent_id}
@@ -78,7 +79,7 @@ class BrowserClient:
         response.raise_for_status()
         return ResumeSessionResponse(**response.json())
 
-    # Page Operations APIs
+    # --- Page Operations ---
 
     async def navigate(self, session_id: str, url: str) -> NavigateResponse:
         payload = {"url": url}
@@ -106,3 +107,17 @@ class BrowserClient:
     async def close_page(self, session_id: str, page_id: str) -> None:
         response = await self.client.delete(f"/sessions/{session_id}/pages/{page_id}")
         response.raise_for_status()
+
+    # --- Page Analysis ---
+
+    async def analyze_page(self, session_id: str, page_id: str) -> PageAnalysisResponse:
+        payload = {"page_id": page_id}
+        response = await self.client.post(f"/sessions/{session_id}/analyze", json=payload)
+        response.raise_for_status()
+        return PageAnalysisResponse(**response.json())
+
+    async def get_accessibility_tree(self, session_id: str, page_id: str) -> AccessibilityTreeResponse:
+        payload = {"page_id": page_id}
+        response = await self.client.post(f"/sessions/{session_id}/accessibility-tree", json=payload)
+        response.raise_for_status()
+        return AccessibilityTreeResponse(**response.json())

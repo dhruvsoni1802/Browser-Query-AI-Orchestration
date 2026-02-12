@@ -1,4 +1,5 @@
 import httpx
+import json
 from langchain_core.tools import tool
 from app.services.browser_client import BrowserClient
 
@@ -79,6 +80,8 @@ def create_browser_tools(client: BrowserClient) -> list:
         """
         try:
             result = await client.get_page_content(session_id, page_id)
+            if result.length > 50000:
+                result.content = result.content[:50000] + f"\n\n... [TRUNCATED — full page is {result.length} chars. Use execute_js for targeted extraction.]"
             return f"Page content (length: {result.length}):\n{result.content}"
         except httpx.HTTPStatusError as e:
             return f"Error getting page content: HTTP {e.response.status_code} — {e.response.text}"
@@ -112,13 +115,56 @@ def create_browser_tools(client: BrowserClient) -> list:
         """
         try:
             result = await client.execute_js(session_id, page_id, script)
-            return f"JavaScript executed successfully. result: {result.result}"
+            output = result.result
+            if isinstance(output, (dict, list)):
+                output = json.dumps(output)
+            return f"JavaScript executed successfully. result: {output}"
         except httpx.HTTPStatusError as e:
             return f"Error executing JavaScript: HTTP {e.response.status_code} — {e.response.text}"
         except httpx.ConnectError:
             return f"Error executing JavaScript: Could not connect to browser infrastructure"
         except Exception as e:
             return f"Error executing JavaScript: {str(e)}"
+
+    @tool
+    async def search_text(session_id: str, page_id: str, query: str, limit: int = 20) -> str:
+        """
+        Search for a keyword in the page text and return matching lines.
+
+        This avoids brittle CSS selectors by scanning visible text content.
+
+        Args:
+            session_id: The session ID from create_session.
+            page_id: The page ID from navigate.
+            query: The keyword to search for (case-insensitive).
+            limit: Max number of matching lines to return.
+
+        Returns:
+            Matching lines containing the query term.
+        """
+        try:
+            q = json.dumps(query)
+            script = f"""
+            (function() {{
+              const query = {q}.toLowerCase();
+              const lines = document.body.innerText.split('\\n')
+                .map(l => l.trim())
+                .filter(Boolean);
+              const matches = lines.filter(l => l.toLowerCase().includes(query));
+              return matches.slice(0, {limit});
+            }})()
+            """
+            result = await client.execute_js(session_id, page_id, script)
+            output = result.result
+            if isinstance(output, (dict, list)):
+                output = json.dumps(output)
+            return f"Search results: {output}"
+        except httpx.HTTPStatusError as e:
+            return f"Error searching text: HTTP {e.response.status_code} — {e.response.text}"
+        except httpx.ConnectError:
+            return f"Error searching text: Could not connect to browser infrastructure"
+        except Exception as e:
+            return f"Error searching text: {str(e)}"
 
     @tool
     async def capture_screenshot(session_id: str, page_id: str) -> str:
@@ -219,14 +265,130 @@ def create_browser_tools(client: BrowserClient) -> list:
             return f"Error deleting session: Could not connect to browser infrastructure"
         except Exception as e:
             return f"Error deleting session: {str(e)}"
+    
+    @tool
+    async def analyze_page(session_id: str, page_id: str) -> str:
+        """
+        Analyze the structure of a page — CSS classes, IDs, headings,
+        interactive elements, and text snippets.
+
+        Use this to understand a page's structure BEFORE attempting
+        to extract data with execute_js. This tells you what CSS
+        classes and IDs actually exist on the page.
+
+        Results are cached — calling this multiple times for the
+        same page is free.
+
+        Args:
+            session_id: The session ID.
+            page_id: The page ID from navigate.
+
+        Returns:
+            A structural overview of the page.
+        """
+        try:
+            result = await client.analyze_page(session_id, page_id)
+            analysis = result.analysis
+            structure = analysis.structure
+
+            parts = [f"Page: {analysis.title} ({analysis.url})"]
+
+            if structure.headings:
+                for tag, texts in structure.headings.items():
+                    parts.append(f"  {tag}: {', '.join(texts[:5])}")
+
+            if structure.classes:
+                parts.append(f"CSS classes: {', '.join(structure.classes[:30])}")
+
+            if structure.ids:
+                parts.append(f"IDs: {', '.join(structure.ids[:20])}")
+
+            if structure.interactive:
+                for elem_type, items in structure.interactive.items():
+                    if items:
+                        parts.append(f"{elem_type}: {', '.join(items[:10])}")
+
+            if structure.semantic_sections:
+                section_summaries = []
+                for section in structure.semantic_sections[:10]:
+                    classes = ", ".join(section.class_name[:5]) if section.class_name else ""
+                    selectors = ", ".join(section.selectors[:3]) if section.selectors else ""
+                    summary = section.type
+                    if classes:
+                        summary += f" [{classes}]"
+                    if selectors:
+                        summary += f" ({selectors})"
+                    section_summaries.append(summary)
+                parts.append(f"Sections: {', '.join(section_summaries)}")
+
+            if structure.data_attributes:
+                parts.append(f"Data attributes: {', '.join(structure.data_attributes[:15])}")
+
+            if structure.text_snippets:
+                parts.append(f"Text snippets: {' | '.join(structure.text_snippets[:5])}")
+
+            return "\n".join(parts)
+
+        except httpx.HTTPStatusError as e:
+            return f"Error analyzing page: HTTP {e.response.status_code} — {e.response.text}"
+        except httpx.ConnectError:
+            return f"Error analyzing page: Could not connect to browser infrastructure"
+        except Exception as e:
+            return f"Error analyzing page: {str(e)}"
+
+    @tool
+    async def get_accessibility_tree(session_id: str, page_id: str) -> str:
+        """
+        Get the accessibility tree of a page — the semantic structure
+        that screen readers see.
+
+        This shows roles (heading, button, link, list), names, and
+        hierarchy WITHOUT any CSS noise. Useful for understanding
+        the meaning and organization of page content.
+
+        Use this when analyze_page doesn't give enough context,
+        or when you need to understand the semantic hierarchy of
+        content on the page.
+
+        Args:
+            session_id: The session ID.
+            page_id: The page ID from navigate.
+
+        Returns:
+            The accessibility tree as a formatted string.
+        """
+        try:
+            result = await client.get_accessibility_tree(session_id, page_id)
+
+            def format_node(node, depth=0) -> str:
+                indent = "  " * depth
+                line = f"{indent}[{node.role}]"
+                if node.name:
+                    # Truncate long names
+                    name = node.name[:80] + "..." if len(node.name) > 80 else node.name
+                    line += f" \"{name}\""
+                lines = [line]
+                for child in node.children[:50]:  # Limit children to avoid huge output
+                    lines.append(format_node(child, depth + 1))
+                return "\n".join(lines)
+
+            formatted = "\n".join(format_node(node) for node in result.nodes[:20])
+            return f"Accessibility tree:\n{formatted}"
+
+        except httpx.HTTPStatusError as e:
+            return f"Error getting accessibility tree: HTTP {e.response.status_code} — {e.response.text}"
+        except httpx.ConnectError:
+            return f"Error getting accessibility tree: Could not connect to browser infrastructure"
+        except Exception as e:
+            return f"Error getting accessibility tree: {str(e)}"
 
     return [
-        create_session,
         navigate,
+        analyze_page,
+        get_accessibility_tree,
         get_page_content,
         execute_js,
+        search_text,
         capture_screenshot,
         close_page,
-        close_session,
-        delete_session,
     ]
